@@ -171,12 +171,15 @@ namespace Blt {
     double hScale_;
     Pixmap cache_;
     int cacheWidth_;
+    int directDraw_;	// draw straight into the window (no pixmaps)
     int cacheHeight_;
 
   protected:
     void layoutGraph();
   
     void drawMargins(Drawable);
+    void drawContents(Drawable);
+    void drawDecorations(Drawable);
     void printMargins(PSOutput*);
     int getMarginGeometry(Margin*);
 

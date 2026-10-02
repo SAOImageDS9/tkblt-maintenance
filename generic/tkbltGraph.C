@@ -29,6 +29,9 @@
 
 #include <cfloat>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 
 #include <tkInt.h>
 
@@ -59,6 +62,37 @@ using namespace Blt;
 #define MARKER_UNDER	1
 
 // OptionSpecs
+
+// Tk 9 on macOS (Aqua) cannot double buffer through pixmaps: its XCopyArea
+// does not support pixmaps ("XXXX Need to deal with pixmaps!" in
+// tkMacOSXImage.c; it returns BadDrawable and copies nothing, which gave an
+// empty or black window; Tk ticket 4af5ca1921122de63).  Even where it works
+// it is slow.  The Tk maintainers recommend drawing straight into the view,
+// which is what Tk's own display procedures do on macOS
+// (TK_NO_DOUBLE_BUFFERING).
+//
+// So: draw straight into the window on Aqua with Tk >= 9 and keep the pixmap
+// path for Tk 8.x and other windowing systems.  The Tk version is taken at run
+// time (a library built against 9.0 also runs under 9.1).
+// TKBLT_DIRECT_DRAW=0|1 in the environment overrides the decision.
+static int useDirectDrawing(Tcl_Interp* interp)
+{
+  const char* env = getenv("TKBLT_DIRECT_DRAW");
+  if (env && *env)
+    return atoi(env) != 0;
+
+  int major = 0;
+  const char* pl = Tcl_GetVar2(interp, "tk_patchLevel", NULL, TCL_GLOBAL_ONLY);
+  if (!pl || sscanf(pl, "%d", &major) != 1 || major < 9)
+    return 0;
+
+  int aqua = 0;
+  Tcl_InterpState state = Tcl_SaveInterpState(interp, TCL_OK);
+  if (Tcl_Eval(interp, "tk windowingsystem") == TCL_OK)
+    aqua = (strcmp(Tcl_GetStringResult(interp), "aqua") == 0);
+  Tcl_RestoreInterpState(interp, state);
+  return aqua;
+}
 
 Graph::Graph(ClientData clientData, Tcl_Interp* interp, 
 	     int objc, Tcl_Obj* const objv[])
@@ -104,6 +138,7 @@ Graph::Graph(ClientData clientData, Tcl_Interp* interp,
   cache_ =None;
   cacheWidth_ =0;
   cacheHeight_ =0;
+  directDraw_ = useDirectDrawing(interp);
 
   Tcl_InitHashTable(&axes_.table, TCL_STRING_KEYS);
   Tcl_InitHashTable(&axes_.tagTable, TCL_STRING_KEYS);
@@ -279,6 +314,16 @@ void Graph::draw()
 
   map();
 
+  if (directDraw_) {
+    // No pixmaps: draw everything into the window, in the same order as the
+    // cached path below.
+    Drawable win = Tk_WindowId(tkwin_);
+    drawContents(win);
+    drawMarkers(win, MARKER_ABOVE);
+    drawDecorations(win);
+    return;
+  }
+
   // Create a pixmap the size of the window for double buffering
   Pixmap drawable = Tk_GetPixmap(display_, Tk_WindowId(tkwin_), 
 				 width_, height_, Tk_Depth(tkwin_));
@@ -295,57 +340,7 @@ void Graph::draw()
 
   // Update cache if needed
   if (flags & CACHE) {
-    drawMargins(cache_);
-
-    switch (legend_->position()) {
-    case Legend::TOP:
-    case Legend::BOTTOM:
-    case Legend::RIGHT:
-    case Legend::LEFT:
-      legend_->draw(cache_);
-      break;
-    default:
-      break;
-    }
-
-    // Draw the background of the plotting area with 3D border
-    Tk_Fill3DRectangle(tkwin_, cache_, ops->plotBg, 
-		       left_-ops->plotBW, 
-		       top_-ops->plotBW, 
-		       right_-left_+1+2*ops->plotBW,
-		       bottom_-top_+1+2*ops->plotBW, 
-		       ops->plotBW, ops->plotRelief);
-  
-    drawAxesGrids(cache_);
-    drawAxes(cache_);
-    drawAxesLimits(cache_);
-
-    if (!legend_->isRaised()) {
-      switch (legend_->position()) {
-      case Legend::PLOT:
-      case Legend::XY:
-	legend_->draw(cache_);
-	break;
-      default:
-	break;
-      }
-    }
-
-    drawMarkers(cache_, MARKER_UNDER);
-    drawElements(cache_);
-    drawActiveElements(cache_);
-
-    if (legend_->isRaised()) {
-      switch (legend_->position()) {
-      case Legend::PLOT:
-      case Legend::XY:
-	legend_->draw(cache_);
-	break;
-      default:
-	break;
-      }
-    }
-
+    drawContents(cache_);
     flags &= ~CACHE;
   }
 
@@ -353,6 +348,76 @@ void Graph::draw()
 	   Tk_Height(tkwin_), 0, 0);
   
   drawMarkers(drawable, MARKER_ABOVE);
+  drawDecorations(drawable);
+
+  CopyArea(display_, drawable, Tk_WindowId(tkwin_), drawGC_,
+	   0, 0, width_, height_, 0, 0);
+
+  Tk_FreePixmap(display_, drawable);
+}
+
+// Everything that is drawn below the "above" markers: margins, legend, plot
+// background, axes, "under" markers and elements.
+void Graph::drawContents(Drawable drawable)
+{
+  GraphOptions* ops = (GraphOptions*)ops_;
+
+  drawMargins(drawable);
+
+  switch (legend_->position()) {
+  case Legend::TOP:
+  case Legend::BOTTOM:
+  case Legend::RIGHT:
+  case Legend::LEFT:
+    legend_->draw(drawable);
+    break;
+  default:
+    break;
+  }
+
+  // Draw the background of the plotting area with 3D border
+  Tk_Fill3DRectangle(tkwin_, drawable, ops->plotBg, 
+		     left_-ops->plotBW, 
+		     top_-ops->plotBW, 
+		     right_-left_+1+2*ops->plotBW,
+		     bottom_-top_+1+2*ops->plotBW, 
+		     ops->plotBW, ops->plotRelief);
+  
+  drawAxesGrids(drawable);
+  drawAxes(drawable);
+  drawAxesLimits(drawable);
+
+  if (!legend_->isRaised()) {
+    switch (legend_->position()) {
+    case Legend::PLOT:
+    case Legend::XY:
+      legend_->draw(drawable);
+      break;
+    default:
+      break;
+    }
+  }
+
+  drawMarkers(drawable, MARKER_UNDER);
+  drawElements(drawable);
+  drawActiveElements(drawable);
+
+  if (legend_->isRaised()) {
+    switch (legend_->position()) {
+    case Legend::PLOT:
+    case Legend::XY:
+      legend_->draw(drawable);
+      break;
+    default:
+      break;
+    }
+  }
+}
+
+// 3D border, focus highlight and crosshairs, drawn on top of everything.
+void Graph::drawDecorations(Drawable drawable)
+{
+  GraphOptions* ops = (GraphOptions*)ops_;
 
   // Draw 3D border just inside of the focus highlight ring
   if ((ops->borderWidth > 0) && (ops->relief != TK_RELIEF_FLAT))
@@ -370,11 +435,6 @@ void Graph::draw()
 
   // crosshairs
   crosshairs_->draw(drawable);
-
-  CopyArea(display_, drawable, Tk_WindowId(tkwin_), drawGC_,
-	   0, 0, width_, height_, 0, 0);
-
-  Tk_FreePixmap(display_, drawable);
 }
 
 int Graph::print(const char* ident, PSOutput* psPtr)

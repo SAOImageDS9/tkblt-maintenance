@@ -402,11 +402,25 @@ void Legend::draw(Drawable drawable)
   int w = width_;
   int h = height_;
 
-  Pixmap pixmap = Tk_GetPixmap(graphPtr_->display_, Tk_WindowId(tkwin), w, h, 
-			       Tk_Depth(tkwin));
+  // Normally the legend is rendered into a pixmap of its own which is then
+  // copied to the drawable at (x_,y_).  Without pixmap support (see
+  // Graph::directDraw_) it is drawn straight into the drawable, with all
+  // coordinates translated by (ox,oy).
+  int direct = graphPtr_->directDraw_;
+  Pixmap pixmap = None;
+  Drawable target = drawable;
+  int ox = x_;
+  int oy = y_;
+  if (!direct) {
+    pixmap = Tk_GetPixmap(graphPtr_->display_, Tk_WindowId(tkwin), w, h, 
+			  Tk_Depth(tkwin));
+    target = pixmap;
+    ox = 0;
+    oy = 0;
+  }
 
   if (ops->normalBg)
-    Tk_Fill3DRectangle(tkwin, pixmap, ops->normalBg, 0, 0, 
+    Tk_Fill3DRectangle(tkwin, target, ops->normalBg, ox, oy, 
 		       w, h, 0, TK_RELIEF_FLAT);
   else {
     switch ((Position)ops->position) {
@@ -414,7 +428,7 @@ void Legend::draw(Drawable drawable)
     case BOTTOM:
     case RIGHT:
     case LEFT:
-      Tk_Fill3DRectangle(tkwin, pixmap, gops->normalBg, 0, 0, 
+      Tk_Fill3DRectangle(tkwin, target, gops->normalBg, ox, oy, 
 			 w, h, 0, TK_RELIEF_FLAT);
       break;
     case PLOT:
@@ -423,7 +437,10 @@ void Legend::draw(Drawable drawable)
       // plot area.  Either copy the part of the background from the backing
       // store pixmap or (if no backing store exists) just fill it with the
       // background color of the plot.
-      if (graphPtr_->cache_ != None)
+      if (direct) {
+	// the plot is already in the window; just draw over it
+      }
+      else if (graphPtr_->cache_ != None)
 	CopyArea(graphPtr_->display_, graphPtr_->cache_, pixmap,
 		 graphPtr_->drawGC_, x_, y_, w, h, 0, 0);
       else 
@@ -443,11 +460,11 @@ void Legend::draw(Drawable drawable)
   int ySymbol = yMid + ops->iyPad; 
   int xSymbol = xMid + 2;
 
-  int x = ops->xPad + ops->borderWidth;
-  int y = ops->yPad + ops->borderWidth;
+  int x = ox + ops->xPad + ops->borderWidth;
+  int y = oy + ops->yPad + ops->borderWidth;
   
   TextStyle tts(graphPtr_, &ops->titleStyle);
-  tts.drawText(pixmap, ops->title, x, y);
+  tts.drawText(target, ops->title, x, y);
   if (titleHeight_ > 0)
     y += titleHeight_ + ops->yPad;
 
@@ -464,7 +481,7 @@ void Legend::draw(Drawable drawable)
 
     int isSelected = entryIsSelected(elemPtr);
     if (elemPtr->labelActive_)
-      Tk_Fill3DRectangle(tkwin, pixmap, ops->activeBg, 
+      Tk_Fill3DRectangle(tkwin, target, ops->activeBg, 
 			 x, y, entryWidth_, entryHeight_, 
 			 ops->entryBW, ops->activeRelief);
     else if (isSelected) {
@@ -473,21 +490,21 @@ void Legend::draw(Drawable drawable)
       Tk_3DBorder bg = (flags & FOCUS) ?
 	ops->selInFocusBg : ops->selOutFocusBg;
       ops->style.color = fg;
-      Tk_Fill3DRectangle(tkwin, pixmap, bg, x, y, 
+      Tk_Fill3DRectangle(tkwin, target, bg, x, y, 
 			 entryWidth_, entryHeight_, 
 			 ops->selBW, ops->selRelief);
     }
     else {
       ops->style.color = ops->fgColor;
       if (elemOps->legendRelief != TK_RELIEF_FLAT)
-	Tk_Fill3DRectangle(tkwin, pixmap, gops->normalBg, 
+	Tk_Fill3DRectangle(tkwin, target, gops->normalBg, 
 			   x, y, entryWidth_, 
 			   entryHeight_, ops->entryBW, 
 			   elemOps->legendRelief);
     }
-    elemPtr->drawSymbol(pixmap, x + xSymbol, y + ySymbol, symbolSize);
+    elemPtr->drawSymbol(target, x + xSymbol, y + ySymbol, symbolSize);
 
-    ts.drawText(pixmap, elemOps->label, x+xLabel, y+ops->entryBW+ops->iyPad);
+    ts.drawText(target, elemOps->label, x+xLabel, y+ops->entryBW+ops->iyPad);
     count++;
 
     if (focusPtr_ == elemPtr) {
@@ -496,7 +513,7 @@ void Legend::draw(Drawable drawable)
 	  ops->selInFocusFgColor : ops->selOutFocusFgColor;
 	XSetForeground(graphPtr_->display_, focusGC_, color->pixel);
       }
-      XDrawRectangle(graphPtr_->display_, pixmap, focusGC_, 
+      XDrawRectangle(graphPtr_->display_, target, focusGC_, 
 		     x + 1, y + 1, entryWidth_ - 3, 
 		     entryHeight_ - 3);
       if (isSelected)
@@ -516,12 +533,13 @@ void Legend::draw(Drawable drawable)
   if (!bg)
     bg = gops->normalBg;
 
-  Tk_Draw3DRectangle(tkwin, pixmap, bg, 0, 0, w, h, 
+  Tk_Draw3DRectangle(tkwin, target, bg, ox, oy, w, h, 
 		     ops->borderWidth, ops->relief);
-  CopyArea(graphPtr_->display_, pixmap, drawable, graphPtr_->drawGC_,
-	   0, 0, w, h, x_, y_);
-
-  Tk_FreePixmap(graphPtr_->display_, pixmap);
+  if (!direct) {
+    CopyArea(graphPtr_->display_, pixmap, drawable, graphPtr_->drawGC_,
+	     0, 0, w, h, x_, y_);
+    Tk_FreePixmap(graphPtr_->display_, pixmap);
+  }
 }
 
 void Legend::print(PSOutput* psPtr)
